@@ -30,6 +30,40 @@ var sensitiveKeywords = []string{
 	"credential",
 }
 
+var (
+	slogMethods = map[string]struct{}{
+		"Debug": {},
+		"Info":  {},
+		"Warn":  {},
+		"Error": {},
+	}
+	zapLoggerMethods = map[string]struct{}{
+		"Debug":  {},
+		"Info":   {},
+		"Warn":   {},
+		"Error":  {},
+		"DPanic": {},
+		"Panic":  {},
+		"Fatal":  {},
+	}
+	zapSugaredMethods = map[string]struct{}{
+		"Debug":   {},
+		"Info":    {},
+		"Warn":    {},
+		"Error":   {},
+		"DPanic":  {},
+		"Panic":   {},
+		"Fatal":   {},
+		"Debugf":  {},
+		"Infof":   {},
+		"Warnf":   {},
+		"Errorf":  {},
+		"DPanicf": {},
+		"Panicf":  {},
+		"Fatalf":  {},
+	}
+)
+
 var Analyzer = &analysis.Analyzer{
 	Name: "loglint",
 	Doc:  "checks log message quality in Go code",
@@ -126,12 +160,13 @@ func extractLogMessageExpr(pass *analysis.Pass, call *ast.CallExpr, loggerAliase
 	}
 
 	if pkgIdent, ok := sel.X.(*ast.Ident); ok {
-		if isImportedPkgIdent(pass, pkgIdent, loggerAliases, "log/slog") {
+		if isImportedPkgIdent(pass, pkgIdent, loggerAliases, "log/slog") && isAllowedSlogMethod(sel.Sel.Name) {
 			return call.Args[0], true
 		}
 	}
 
-	if !isZapLoggerExpr(pass, sel.X) {
+	zapType, ok := zapLoggerType(pass, sel.X)
+	if !ok || !isAllowedZapMethod(sel.Sel.Name, zapType) {
 		return nil, false
 	}
 
@@ -157,10 +192,10 @@ func isImportedPkgIdent(pass *analysis.Pass, ident *ast.Ident, aliases map[strin
 	return pkgObj.Imported().Path() == expectedPath
 }
 
-func isZapLoggerExpr(pass *analysis.Pass, expr ast.Expr) bool {
+func zapLoggerType(pass *analysis.Pass, expr ast.Expr) (string, bool) {
 	tv, ok := pass.TypesInfo.Types[expr]
 	if !ok || tv.Type == nil {
-		return false
+		return "", false
 	}
 
 	typ := tv.Type
@@ -170,14 +205,39 @@ func isZapLoggerExpr(pass *analysis.Pass, expr ast.Expr) bool {
 
 	named, ok := typ.(*types.Named)
 	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
-		return false
+		return "", false
 	}
 
 	pkgPath := named.Obj().Pkg().Path()
 	typeName := named.Obj().Name()
 
-	ok = pkgPath == "go.uber.org/zap" && (typeName == "Logger" || typeName == "SugaredLogger")
+	if pkgPath != "go.uber.org/zap" {
+		return "", false
+	}
+
+	if typeName != "Logger" && typeName != "SugaredLogger" {
+		return "", false
+	}
+
+	return typeName, true
+}
+
+func isAllowedSlogMethod(method string) bool {
+	_, ok := slogMethods[method]
 	return ok
+}
+
+func isAllowedZapMethod(method, loggerType string) bool {
+	switch loggerType {
+	case "Logger":
+		_, ok := zapLoggerMethods[method]
+		return ok
+	case "SugaredLogger":
+		_, ok := zapSugaredMethods[method]
+		return ok
+	default:
+		return false
+	}
 }
 
 func normalizeMessageText(expr ast.Expr, inConcat bool) (string, bool) {
@@ -243,10 +303,13 @@ func checkLowercaseStart(msg string) bool {
 
 func checkEnglishOnly(msg string) bool {
 	for _, r := range msg {
-		if isASCIIAlphaNumSpace(r) {
+		if !unicode.IsLetter(r) {
 			continue
 		}
-		return false
+
+		if !isASCIIAlpha(r) {
+			return false
+		}
 	}
 	return true
 }
@@ -266,6 +329,10 @@ func isASCIIAlphaNumSpace(r rune) bool {
 		(r >= 'a' && r <= 'z') ||
 		(r >= 'A' && r <= 'Z') ||
 		(r >= '0' && r <= '9')
+}
+
+func isASCIIAlpha(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 func checkNoSensitiveData(msgText string, msgExpr ast.Expr) bool {
