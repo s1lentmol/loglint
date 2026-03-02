@@ -8,7 +8,7 @@ import (
 	"golang.org/x/tools/go/analysis/analysistest"
 )
 
-func TestAnalyzerSmoke(t *testing.T) {
+func TestAnalyzer(t *testing.T) {
 	t.Parallel()
 
 	testdata, err := filepath.Abs(filepath.Join("..", "..", "testdata"))
@@ -16,5 +16,16 @@ func TestAnalyzerSmoke(t *testing.T) {
 		t.Fatalf("resolve testdata path: %v", err)
 	}
 
-	analysistest.Run(t, testdata, analyzer.Analyzer, "basic")
+	analysistest.Run(
+		t,
+		testdata,
+		analyzer.Analyzer,
+		"valid",
+		"lowercase",
+		"english",
+		"specialchars",
+		"sensitive",
+		"mixed",
+		"edgecases",
+	)
 }
