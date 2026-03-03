@@ -1,0 +1,12 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - loglint
+  settings:
+    custom:
+      loglint:
+        type: module
+        description: Checks log message quality in Go code.
+        settings: {}
