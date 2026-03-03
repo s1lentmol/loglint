@@ -106,7 +106,7 @@ func TestHasSensitiveKeyword(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := hasSensitiveKeyword(tc.in)
+			got := hasSensitiveKeyword(tc.in, defaultSensitiveKeywords)
 			if got != tc.want {
 				t.Fatalf("hasSensitiveKeyword(%q) = %v, want %v", tc.in, got, tc.want)
 			}
@@ -158,11 +158,34 @@ func TestCheckNoSensitiveData(t *testing.T) {
 				t.Fatalf("parse expr %q: %v", tc.expr, err)
 			}
 
-			got := checkNoSensitiveData(tc.msgText, expr)
+			got := checkNoSensitiveData(tc.msgText, expr, defaultSensitiveKeywords)
 			if got != tc.want {
 				t.Fatalf("checkNoSensitiveData(%q, %q) = %v, want %v", tc.msgText, tc.expr, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveSensitiveKeywords(t *testing.T) {
+	t.Parallel()
+
+	appendMode, err := resolveSensitiveKeywords("append", []string{"sessionid"})
+	if err != nil {
+		t.Fatalf("append mode: %v", err)
+	}
+	if !hasSensitiveKeyword("sessionid", appendMode) || !hasSensitiveKeyword("password", appendMode) {
+		t.Fatalf("append mode did not merge defaults and custom")
+	}
+
+	overrideMode, err := resolveSensitiveKeywords("override", []string{"sessionid"})
+	if err != nil {
+		t.Fatalf("override mode: %v", err)
+	}
+	if !hasSensitiveKeyword("sessionid", overrideMode) {
+		t.Fatalf("override mode missing custom keyword")
+	}
+	if hasSensitiveKeyword("password", overrideMode) {
+		t.Fatalf("override mode should drop default keywords")
 	}
 }
 

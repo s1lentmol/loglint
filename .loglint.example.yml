@@ -1,0 +1,18 @@
+version: 1
+
+rules:
+  lowercase_start: true
+  english_only: true
+  no_special_chars: true
+  no_sensitive_data: true
+
+sensitive:
+  mode: append
+  keywords:
+    - sessionid
+    - private_key
+
+ignore:
+  paths:
+    - "vendor/**"
+    - "**/*_generated.go"

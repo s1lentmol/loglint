@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/s1lentmol/loglint/internal/config"
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -18,7 +20,7 @@ const (
 	diagNoSensitive    = "log message must not contain potential sensitive data"
 )
 
-var sensitiveKeywords = []string{
+var defaultSensitiveKeywords = []string{
 	"password",
 	"passwd",
 	"pwd",
@@ -64,14 +66,101 @@ var (
 	}
 )
 
-var Analyzer = &analysis.Analyzer{
-	Name: "loglint",
-	Doc:  "checks log message quality in Go code",
-	Run:  run,
+var Analyzer = MustNew(config.Default())
+
+type runtimeConfig struct {
+	rules             config.RulesConfig
+	sensitiveKeywords []string
+	ignoreMatcher     config.IgnoreMatcher
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func New(cfg config.Config) (*analysis.Analyzer, error) {
+	rt, err := buildRuntimeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &analysis.Analyzer{
+		Name: "loglint",
+		Doc:  "checks log message quality in Go code",
+		Run: func(pass *analysis.Pass) (any, error) {
+			return run(pass, rt)
+		},
+	}, nil
+}
+
+func MustNew(cfg config.Config) *analysis.Analyzer {
+	an, err := New(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return an
+}
+
+func buildRuntimeConfig(cfg config.Config) (runtimeConfig, error) {
+	if cfg.Version == 0 {
+		cfg = config.Default()
+	}
+	if cfg.Sensitive.Mode == "" {
+		cfg.Sensitive.Mode = config.SensitiveModeAppend
+	}
+
+	matcher, err := config.CompileIgnoreMatcher(cfg.Ignore.Paths)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+
+	sensitive, err := resolveSensitiveKeywords(cfg.Sensitive.Mode, cfg.Sensitive.Keywords)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+
+	return runtimeConfig{
+		rules:             cfg.Rules,
+		sensitiveKeywords: sensitive,
+		ignoreMatcher:     matcher,
+	}, nil
+}
+
+func resolveSensitiveKeywords(mode string, custom []string) ([]string, error) {
+	base := make([]string, len(defaultSensitiveKeywords))
+	copy(base, defaultSensitiveKeywords)
+
+	switch mode {
+	case config.SensitiveModeAppend:
+		return mergeKeywords(base, custom), nil
+	case config.SensitiveModeOverride:
+		return mergeKeywords(nil, custom), nil
+	default:
+		return nil, fmt.Errorf("loglint config: invalid sensitive.mode %q", mode)
+	}
+}
+
+func mergeKeywords(base, custom []string) []string {
+	out := make([]string, 0, len(base)+len(custom))
+	seen := make(map[string]struct{}, len(base)+len(custom))
+
+	for _, kw := range append(base, custom...) {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw == "" {
+			continue
+		}
+		if _, ok := seen[kw]; ok {
+			continue
+		}
+		seen[kw] = struct{}{}
+		out = append(out, kw)
+	}
+
+	return out
+}
+
+func run(pass *analysis.Pass, rt runtimeConfig) (any, error) {
 	for _, file := range pass.Files {
+		if f := pass.Fset.File(file.Pos()); f != nil && rt.ignoreMatcher.Match(f.Name()) {
+			continue
+		}
+
 		loggerAliases := loggerImportAliases(file)
 		if len(loggerAliases) == 0 {
 			continue
@@ -99,16 +188,16 @@ func run(pass *analysis.Pass) (any, error) {
 				pos = call.Pos()
 			}
 
-			if !checkLowercaseStart(ruleText) {
+			if rt.rules.LowercaseStart && !checkLowercaseStart(ruleText) {
 				pass.Reportf(pos, diagLowercaseStart)
 			}
-			if !checkEnglishOnly(ruleText) {
+			if rt.rules.EnglishOnly && !checkEnglishOnly(ruleText) {
 				pass.Reportf(pos, diagEnglishOnly)
 			}
-			if !checkNoSpecialCharsOrEmoji(ruleText) {
+			if rt.rules.NoSpecialChars && !checkNoSpecialCharsOrEmoji(ruleText) {
 				pass.Reportf(pos, diagNoSpecial)
 			}
-			if !checkNoSensitiveData(msgText, msgExpr) {
+			if rt.rules.NoSensitiveData && !checkNoSensitiveData(msgText, msgExpr, rt.sensitiveKeywords) {
 				pass.Reportf(pos, diagNoSensitive)
 			}
 
@@ -335,8 +424,8 @@ func isASCIIAlpha(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
-func checkNoSensitiveData(msgText string, msgExpr ast.Expr) bool {
-	if hasSensitiveKeyword(msgText) {
+func checkNoSensitiveData(msgText string, msgExpr ast.Expr, keywords []string) bool {
+	if hasSensitiveKeyword(msgText, keywords) {
 		return false
 	}
 
@@ -344,12 +433,12 @@ func checkNoSensitiveData(msgText string, msgExpr ast.Expr) bool {
 	ast.Inspect(msgExpr, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.Ident:
-			if hasSensitiveKeyword(x.Name) {
+			if hasSensitiveKeyword(x.Name, keywords) {
 				found = true
 				return false
 			}
 		case *ast.SelectorExpr:
-			if hasSensitiveKeyword(x.Sel.Name) {
+			if hasSensitiveKeyword(x.Sel.Name, keywords) {
 				found = true
 				return false
 			}
@@ -360,9 +449,9 @@ func checkNoSensitiveData(msgText string, msgExpr ast.Expr) bool {
 	return !found
 }
 
-func hasSensitiveKeyword(s string) bool {
+func hasSensitiveKeyword(s string, keywords []string) bool {
 	lower := strings.ToLower(s)
-	for _, kw := range sensitiveKeywords {
+	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
 			return true
 		}

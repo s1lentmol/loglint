@@ -9,4 +9,5 @@ linters:
       loglint:
         type: module
         description: Checks log message quality in Go code.
-        settings: {}
+        settings:
+          config: ".loglint.yml"
